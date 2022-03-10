@@ -11,8 +11,8 @@ struct file_factory {
 };
 
 static file_handle
-fopen_(struct file_factory *f, const char *filename, const char *mode) {
-    lua_State *L = f->L;
+fopen_(struct file_factory *ff, const char *filename, const char *mode) {
+    lua_State *L = ff->L;
     lua_pushvalue(L, 1);
     lua_pushstring(L, filename);
     if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
@@ -40,7 +40,7 @@ fwrite_(struct file_factory *f, file_handle handle, const void *buffer, size_t s
     return fwrite(buffer, 1, sz, (FILE *)handle);
 }
 
-static size_t
+static int
 fseek_(struct file_factory *f, file_handle handle, size_t offset) {
     return fseek((FILE *)handle, offset, SEEK_SET); 
 }
@@ -60,7 +60,7 @@ lfactory(lua_State *L) {
         fseek_,
     };
 
-    struct wrapper *f = (struct wrapper *)lua_userdatauv(L, sizeof(*f), 1);
+    struct wrapper *f = (struct wrapper *)lua_newuserdatauv(L, sizeof(*f), 1);
     f->f.L = lua_newthread(L);
     lua_setiuservalue(L, -2, 1);
     f->i.api = &apis;
@@ -87,9 +87,34 @@ luaopen_file(lua_State *L) {
     return 1;    
 }
 
+#ifdef FILE_TEST
+
 struct box_file {
+    struct file_interface *f;
     file_handle handle;
 };
+
+static int
+lclose(lua_State *L) {
+    struct box_file *ud = (struct box_file *)luaL_checkudata(L, 1, "FILE");
+    if (ud->handle) {
+        file_close(ud->f, ud->handle);
+        ud->handle = NULL;
+    }
+    return 0;
+}
+
+static int
+lread(lua_State *L) {
+    struct box_file *ud = (struct box_file *)luaL_checkudata(L, 1, "FILE");
+    if (ud->handle == NULL)
+        return luaL_error(L, "read closed file");
+    size_t sz = luaL_checkinteger(L, 2);
+    void *buffer = lua_newuserdatauv(L, sz, 0);
+    sz = file_read(ud->f, ud->handle, buffer, sz);
+    lua_pushlstring(L, buffer, sz);
+    return 1;
+}
 
 static int
 lopen(lua_State *L) {
@@ -99,8 +124,24 @@ lopen(lua_State *L) {
     file_handle handle = file_open(f, filename, mode);
     if (handle == NULL)
         return luaL_error(L, "Can't open %s", filename);
-    struct box_file *f = lua_newuserdatauv(L, sizeof(*f), 0);
-    f->handle = handle;
+    struct box_file *ud = (struct box_file *)lua_newuserdatauv(L, sizeof(*f), 1);
+    lua_pushvalue(L, 1);
+    lua_setiuservalue(L, -2, 1);
+    ud->f = f;
+    ud->handle = handle;
+    if (luaL_newmetatable(L, "FILE")) {
+        luaL_Reg l[] = {
+            { "read", lread },
+            { "close", lclose },
+            { "__gc", lclose },
+            { "__index", NULL },
+            { NULL, NULL },
+        };
+        luaL_setfuncs(L, l, 0);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -2, "__index");
+    }
+    lua_setmetatable(L, -2);
     return 1;     
 }
 
@@ -114,3 +155,5 @@ luaopen_file_test(lua_State *L) {
     luaL_newlib(L, l);
     return 1;
 }
+
+#endif
